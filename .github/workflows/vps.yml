@@ -1,4 +1,4 @@
-name: Create VPS (Minecraft + Playit + tmate + Backup + Password)
+name: Create VPS (Minecraft + Backup + Playit Persistent + Tmate + Password + Warning)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
       - name: ⬇️ Checkout
         uses: actions/checkout@v3
 
-      - name: 📁 Prepare directories
+      - name: 📁 Prepare dirs
         run: |
           mkdir -p links server backups ~/.config/playit_gg
 
@@ -29,17 +29,16 @@ jobs:
           echo "runner:MySecurePass123!" | sudo chpasswd
           echo "✅ Runner password set (user=runner)" > links/password.txt
 
-      - name: 📥 Install Dependencies + AWS CLI v2 + tmate
+      - name: 📥 Install Dependencies + AWS CLI v2
         run: |
           sudo apt update -y
-          sudo apt install -y unzip zip curl wget screen openjdk-17-jdk tmate
+          sudo apt install -y unzip zip curl wget screen openjdk-17-jdk
           curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
           unzip -q awscliv2.zip
           sudo ./aws/install --update
           aws --version
-          tmate -V
 
-      - name: 💾 Restore server backup
+      - name: 💾 Restore server backup (from Filebase)
         run: |
           if aws --endpoint-url=https://s3.filebase.com s3 ls "s3://$FILEBASE_BUCKET/server-backup.zip" >/dev/null 2>&1; then
             echo "⬇️ Restoring server-backup.zip ..."
@@ -58,7 +57,7 @@ jobs:
           fi
           echo "eula=true" > eula.txt
 
-      - name: 🚀 Start Minecraft server
+      - name: 🚀 Start Minecraft server (screen)
         run: |
           cd server
           screen -dmS mc bash -c 'java -Xms12G -Xmx12G -jar paper-1.20.1.jar nogui'
@@ -69,6 +68,7 @@ jobs:
           else
             echo "⚠️ Failed to start Minecraft screen session"
             screen -ls || true
+          fi
 
       - name: 🚀 Start Playit agent (persistent)
         run: |
@@ -79,23 +79,20 @@ jobs:
           fi
 
           mkdir -p ~/.config/playit_gg
-          if ! aws --endpoint-url=https://s3.filebase.com s3 cp "s3://$FILEBASE_BUCKET/playit.toml" ~/.config/playit_gg/playit.toml >/dev/null 2>&1; then
-            echo "⚠️ No playit.toml in Filebase, will be generated on first run"
-          fi
+          aws --endpoint-url=https://s3.filebase.com s3 cp "s3://$FILEBASE_BUCKET/playit.toml" ~/.config/playit_gg/playit.toml || echo "⚠️ No playit.toml in Filebase (first run?)"
 
           nohup $AGENT_BIN --config ~/.config/playit_gg/playit.toml > playit.log 2>&1 &
-          sleep 20
+          sleep 15
           tail -n 200 playit.log > links/playit.txt || echo "⚠️ No playit log" > links/playit.txt
           echo "✅ Playit started (check links/playit.txt for tunnel info)"
 
-      - name: 🚀 Start tmate session (SSH access)
+      - name: 🔑 Start tmate (SSH access)
         run: |
+          sudo apt install -y tmate
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
-          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          echo "$TMATE_SSH" | tee links/ssh.txt
-          echo "✅ tmate session started. SSH link saved to links/ssh.txt"
-          aws --endpoint-url=https://s3.filebase.com s3 cp links/ssh.txt "s3://$FILEBASE_BUCKET/ssh.txt" || true
+          tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' > links/ssh.txt
+          echo "✅ tmate session started (check links/ssh.txt for SSH access)"
 
       - name: ⏳ Keep VPS alive (6 hours)
         run: |
@@ -123,11 +120,15 @@ jobs:
             cd ..
             aws --endpoint-url=https://s3.filebase.com s3 cp server-backup.zip "s3://$FILEBASE_BUCKET/server-backup.zip"
             echo "✅ Server backup uploaded"
+          else
+            echo "⚠️ server/ directory missing — nothing to backup"
           fi
 
           if [ -f ~/.config/playit_gg/playit.toml ]; then
             aws --endpoint-url=https://s3.filebase.com s3 cp ~/.config/playit_gg/playit.toml "s3://$FILEBASE_BUCKET/playit.toml"
             echo "✅ playit.toml uploaded"
+          else
+            echo "⚠️ No local playit.toml to upload"
           fi
 
       - name: 🔁 Restart workflow automatically

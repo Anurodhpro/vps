@@ -1,0 +1,130 @@
+name: Create VPS (Minecraft + Backup + Playit Persistent + Password + Warning)
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [create-vps]
+
+jobs:
+  start-vps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.FILEBASE_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+    steps:
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v4
+
+      - name: 📁 Prepare directories
+        run: mkdir -p links server backups ~/.config/playit_gg
+
+      - name: 🔑 Set runner password
+        run: |
+          echo "runner:MySecurePass123!" | sudo chpasswd
+          echo "✅ Password set for runner (MySecurePass123!)" > links/password.txt
+
+      - name: 📥 Install dependencies + AWS CLI v2
+        run: |
+          sudo apt update -y
+          sudo apt install -y unzip zip curl wget screen openjdk-17-jdk
+          curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip -q awscliv2.zip
+          sudo ./aws/install --update
+          aws --version
+
+      - name: 💾 Restore Minecraft backup (if any)
+        run: |
+          if aws --endpoint-url=https://s3.filebase.com s3 ls "s3://$FILEBASE_BUCKET/server-backup.zip" >/dev/null 2>&1; then
+            echo "⬇️ Found backup, restoring..."
+            aws --endpoint-url=https://s3.filebase.com s3 cp "s3://$FILEBASE_BUCKET/server-backup.zip" .
+            unzip -o server-backup.zip -d server
+          else
+            echo "⚠️ No previous backup found, starting fresh."
+          fi
+
+      - name: 📥 Ensure Paper 1.20.1 exists
+        run: |
+          cd server
+          if [ ! -f paper-1.20.1.jar ]; then
+            echo "⬇️ Downloading Paper 1.20.1..."
+            curl -L -o paper-1.20.1.jar \
+              "https://api.papermc.io/v2/projects/paper/versions/1.20.1/builds/106/downloads/paper-1.20.1-106.jar"
+          fi
+          echo "eula=true" > eula.txt
+
+      - name: 🚀 Start Minecraft server
+        run: |
+          cd server
+          screen -dmS mc bash -c 'java -Xms12G -Xmx12G -jar paper-1.20.1.jar nogui'
+          sleep 10
+          if screen -list | grep -q "mc"; then
+            echo "✅ Minecraft started" > ../links/mc.txt
+          else
+            echo "❌ Failed to start Minecraft" > ../links/mc.txt
+          fi
+
+      - name: 🚀 Start Playit agent (persistent)
+        run: |
+          AGENT_BIN="./playit"
+          if [ ! -f "$AGENT_BIN" ]; then
+            curl -L -o "$AGENT_BIN" "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-amd64"
+            chmod +x "$AGENT_BIN"
+          fi
+
+          # restore configs
+          aws --endpoint-url=https://s3.filebase.com s3 cp "s3://$FILEBASE_BUCKET/playit.toml" ~/.config/playit_gg/playit.toml || true
+          aws --endpoint-url=https://s3.filebase.com s3 cp "s3://$FILEBASE_BUCKET/playit_claim.txt" ~/.config/playit_gg/playit_claim || true
+
+          nohup $AGENT_BIN --config ~/.config/playit_gg/playit.toml --claim ~/.config/playit_gg/playit_claim > playit.log 2>&1 &
+          sleep 15
+          tail -n 200 playit.log > links/playit.txt || echo "⚠️ No playit log" > links/playit.txt
+
+      - name: ⏳ Keep VPS alive (6h)
+        run: |
+          for i in $(seq 1 360); do
+            echo "🟢 Minute $i/360"
+            sleep 60
+          done
+
+      - name: 💾 Stop + Backup
+        if: always()
+        run: |
+          if screen -list | grep -q "mc"; then
+            echo "⚠️ Notifying players..."
+            screen -S mc -p 0 -X stuff "say ⚠️ Server restarting in 60s$(printf '\r')"
+            sleep 50
+            screen -S mc -p 0 -X stuff "say ⚠️ Restart in 10s$(printf '\r')"
+            sleep 10
+            screen -S mc -p 0 -X stuff "stop$(printf '\r')"
+            sleep 20
+          fi
+
+          if [ -d server ]; then
+            cd server
+            zip -r ../server-backup.zip ./*
+            cd ..
+            aws --endpoint-url=https://s3.filebase.com s3 cp server-backup.zip "s3://$FILEBASE_BUCKET/server-backup.zip"
+            echo "✅ Server backup uploaded"
+          fi
+
+          if [ -f ~/.config/playit_gg/playit.toml ]; then
+            aws --endpoint-url=https://s3.filebase.com s3 cp ~/.config/playit_gg/playit.toml "s3://$FILEBASE_BUCKET/playit.toml"
+          fi
+          if [ -f ~/.config/playit_gg/playit_claim ]; then
+            aws --endpoint-url=https://s3.filebase.com s3 cp ~/.config/playit_gg/playit_claim "s3://$FILEBASE_BUCKET/playit_claim.txt"
+          fi
+
+      - name: 🔁 Auto-restart workflow
+        if: always()
+        run: |
+          curl -s -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -d "{\"event_type\":\"create-vps\"}"

@@ -1,4 +1,4 @@
-name: Create VPS (Minecraft + Backup + Playit Persistent + Password + Warning)
+name: Create VPS (Minecraft + Playit + tmate + Backup + Password)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
 jobs:
   start-vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max
+    timeout-minutes: 360
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.FILEBASE_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
@@ -20,7 +20,7 @@ jobs:
       - name: ⬇️ Checkout
         uses: actions/checkout@v3
 
-      - name: 📁 Prepare dirs
+      - name: 📁 Prepare directories
         run: |
           mkdir -p links server backups ~/.config/playit_gg
 
@@ -29,16 +29,17 @@ jobs:
           echo "runner:MySecurePass123!" | sudo chpasswd
           echo "✅ Runner password set (user=runner)" > links/password.txt
 
-      - name: 📥 Install Dependencies + AWS CLI v2
+      - name: 📥 Install Dependencies + AWS CLI v2 + tmate
         run: |
           sudo apt update -y
-          sudo apt install -y unzip zip curl wget screen openjdk-17-jdk
+          sudo apt install -y unzip zip curl wget screen openjdk-17-jdk tmate
           curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
           unzip -q awscliv2.zip
           sudo ./aws/install --update
           aws --version
+          tmate -V
 
-      - name: 💾 Restore server backup (from Filebase)
+      - name: 💾 Restore server backup
         run: |
           if aws --endpoint-url=https://s3.filebase.com s3 ls "s3://$FILEBASE_BUCKET/server-backup.zip" >/dev/null 2>&1; then
             echo "⬇️ Restoring server-backup.zip ..."
@@ -57,7 +58,7 @@ jobs:
           fi
           echo "eula=true" > eula.txt
 
-      - name: 🚀 Start Minecraft server (screen)
+      - name: 🚀 Start Minecraft server
         run: |
           cd server
           screen -dmS mc bash -c 'java -Xms12G -Xmx12G -jar paper-1.20.1.jar nogui'
@@ -68,7 +69,6 @@ jobs:
           else
             echo "⚠️ Failed to start Minecraft screen session"
             screen -ls || true
-          fi
 
       - name: 🚀 Start Playit agent (persistent)
         run: |
@@ -79,12 +79,23 @@ jobs:
           fi
 
           mkdir -p ~/.config/playit_gg
-          aws --endpoint-url=https://s3.filebase.com s3 cp "s3://$FILEBASE_BUCKET/playit.toml" ~/.config/playit_gg/playit.toml || echo "⚠️ No playit.toml in Filebase (first run?)"
+          if ! aws --endpoint-url=https://s3.filebase.com s3 cp "s3://$FILEBASE_BUCKET/playit.toml" ~/.config/playit_gg/playit.toml >/dev/null 2>&1; then
+            echo "⚠️ No playit.toml in Filebase, will be generated on first run"
+          fi
 
           nohup $AGENT_BIN --config ~/.config/playit_gg/playit.toml > playit.log 2>&1 &
-          sleep 15
+          sleep 20
           tail -n 200 playit.log > links/playit.txt || echo "⚠️ No playit log" > links/playit.txt
           echo "✅ Playit started (check links/playit.txt for tunnel info)"
+
+      - name: 🚀 Start tmate session (SSH access)
+        run: |
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          echo "$TMATE_SSH" | tee links/ssh.txt
+          echo "✅ tmate session started. SSH link saved to links/ssh.txt"
+          aws --endpoint-url=https://s3.filebase.com s3 cp links/ssh.txt "s3://$FILEBASE_BUCKET/ssh.txt" || true
 
       - name: ⏳ Keep VPS alive (6 hours)
         run: |
@@ -93,7 +104,7 @@ jobs:
             sleep 60 || break
           done
 
-      - name: 💾 Stop server safely & Backup (after 6h)
+      - name: 💾 Stop server safely & Backup
         if: always()
         run: |
           if screen -list | grep -q "\bmc\b"; then
@@ -112,15 +123,11 @@ jobs:
             cd ..
             aws --endpoint-url=https://s3.filebase.com s3 cp server-backup.zip "s3://$FILEBASE_BUCKET/server-backup.zip"
             echo "✅ Server backup uploaded"
-          else
-            echo "⚠️ server/ directory missing — nothing to backup"
           fi
 
           if [ -f ~/.config/playit_gg/playit.toml ]; then
             aws --endpoint-url=https://s3.filebase.com s3 cp ~/.config/playit_gg/playit.toml "s3://$FILEBASE_BUCKET/playit.toml"
-            echo "✅ playit.toml uploaded to Filebase"
-          else
-            echo "⚠️ No local playit.toml to upload"
+            echo "✅ playit.toml uploaded"
           fi
 
       - name: 🔁 Restart workflow automatically
